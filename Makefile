@@ -24,3 +24,11 @@ run-tests: test
 
 clean:
 	rm -rf build
+
+analyze:
+	cppcheck \
+	--enable=all \
+	--inconclusive \
+	--std=c11 \
+	--quiet \
+	core tests	
