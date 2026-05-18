@@ -10,7 +10,8 @@ on:
       - main
 
 jobs:
-  build-and-test:
+
+  docker-build-and-test:
 
     runs-on: ubuntu-latest
 
@@ -19,15 +20,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install build tools
+      - name: Build Docker image
         run: |
-          sudo apt update
-          sudo apt install -y build-essential
+          docker build -t btnsim-ci .
 
-      - name: Build project
+      - name: Run tests inside container
         run: |
-          make
-
-      - name: Run unit tests
-        run: |
-          make run-tests
+          docker run --rm btnsim-ci
