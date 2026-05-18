@@ -32,3 +32,20 @@ analyze:
 	--std=c11 \
 	--quiet \
 	core tests	
+
+WIN_CC=x86_64-w64-mingw32-gcc
+
+SIM_SRC=simulator/btnsim_win32.c
+
+WIN_OUT=build/btnsim.exe
+
+win-build: build
+	$(WIN_CC) \
+	-Wall \
+	-O2 \
+	$(SIM_SRC) \
+	$(CORE_SRC) \
+	-o $(WIN_OUT) \
+	-lcomctl32 \
+	-lgdi32 \
+	-luser32	

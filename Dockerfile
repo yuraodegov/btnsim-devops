@@ -7,6 +7,7 @@ RUN apt update && apt install -y \
     gcc \
     make \
     cppcheck \
+    mingw-w64 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

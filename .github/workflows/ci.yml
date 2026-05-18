@@ -1,4 +1,4 @@
-name: BTNSIM CI
+name: BTNSIM CI/CD
 
 on:
   push:
@@ -11,7 +11,7 @@ on:
 
 jobs:
 
-  docker-build-and-test:
+  build-test-package:
 
     runs-on: ubuntu-latest
 
@@ -24,6 +24,23 @@ jobs:
         run: |
           docker build -t btnsim-ci .
 
-      - name: Run tests inside container
+      - name: Run static analysis
         run: |
-          docker run --rm btnsim-ci
+          docker run --rm btnsim-ci make analyze
+
+      - name: Run unit tests
+        run: |
+          docker run --rm btnsim-ci make run-tests
+
+      - name: Build Windows executable
+        run: |
+          docker run --rm \
+            -v ${{ github.workspace }}/build:/app/build \
+            btnsim-ci \
+            make win-build
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: btnsim-windows
+          path: build/btnsim.exe
