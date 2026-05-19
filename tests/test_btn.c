@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
 #include "../core/btn_fsm.h"
 
@@ -153,6 +154,60 @@ static void test_idle_init(TestResult *r)
 
 /* ── main ──────────────────────────────────────────────────────────────── */
 
+static void test_stdout_output(TestResult *r)
+{
+    r->passed = 1;
+    strcpy(r->msg, "OK");
+
+    FILE *fp =
+        freopen("test_output.txt", "w", stdout);
+
+    if (!fp) {
+        r->passed = 0;
+        strcpy(r->msg, "stdout redirect failed");
+        return;
+    }
+
+    BtnFSM btn;
+
+    btn_init(&btn);
+
+    fflush(stdout);
+
+    fclose(stdout);
+
+    FILE *f =
+        fopen("test_output.txt", "r");
+
+    if (!f) {
+        r->passed = 0;
+        strcpy(r->msg, "cannot open output file");
+        return;
+    }
+
+    char buffer[256] = {0};
+
+    size_t n =
+    fread(buffer,
+          1,
+          sizeof(buffer)-1,
+          f);
+
+    (void)n;
+
+    fclose(f);
+
+    if (strstr(buffer,
+        "HELLO TESTER") == NULL)
+    {
+        r->passed = 0;
+
+        strcpy(
+            r->msg,
+            "HELLO TESTER missing");
+    }
+}
+
 int main(void)
 {
     struct {
@@ -166,6 +221,7 @@ int main(void)
         {"test_no_double_after_timeout",test_no_double_after_timeout},
         {"test_long_press_no_repeat",   test_long_press_no_repeat},
         {"test_idle_init",              test_idle_init},
+        {"test_stdout_output", test_stdout_output},
     };
 
     int total  = sizeof(tests) / sizeof(tests[0]);

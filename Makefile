@@ -49,3 +49,12 @@ win-build: build
 	-lcomctl32 \
 	-lgdi32 \
 	-luser32	
+
+ui-tests:
+	gcc -Wall -Wextra -std=c11 -O2 \
+	core/btn_fsm.c \
+	simulator/ui_logic.c \
+	tests/test_ui.c \
+	-o build/test_ui
+
+	./build/test_ui	

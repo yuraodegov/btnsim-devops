@@ -14,7 +14,7 @@
 **WinAPI Button Hardware Simulator · FSM Architecture · Full CI/CD Pipeline**
 
 [![CI](https://github.com/yuraodegov/btnsim-devops/actions/workflows/ci.yml/badge.svg)](https://github.com/yuraodegov/btnsim-devops/actions/workflows/ci.yml)
-[![C](https://img.shields.io/badge/language-C-00599C?logo=c&logoColor=white)](https://en.wikipedia.org/wiki/C_(programming_language))
+[![C](https://img.shields.io/badge/language-C99-00599C?logo=c&logoColor=white)](https://en.wikipedia.org/wiki/C_(programming_language))
 [![Docker](https://img.shields.io/badge/Docker-enabled-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
 [![Windows](https://img.shields.io/badge/target-Windows%20x64-0078D6?logo=windows&logoColor=white)](https://www.microsoft.com/windows)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
@@ -23,154 +23,185 @@
 
 ---
 
-## 🧠 What is this?
+## Что это?
 
-**BTNSIM-DEVOPS** is a hardware button simulator written in C, built around a **Finite State Machine** architecture with a **WinAPI** backend. It demonstrates how to design embedded-style event-driven logic and ship it through a complete, production-grade DevOps pipeline — all from a Linux CI environment.
+**BTNSIM-DEVOPS** — симулятор аппаратной кнопки на C с FSM-архитектурой и WinAPI-интерфейсом.  
+Демонстрирует embedded-стиль разработки с полным DevOps-пайплайном: Docker, GitHub Actions, кросс-компиляция Linux → Windows.
 
-> Cross-compiled on Linux. Runs on Windows. Tested automatically. Delivered as artifact.
+> Собирается на Linux. Запускается на Windows. Тестируется автоматически.
 
 ---
 
-## ⚡ Features
+## Возможности
 
-| Feature | Details |
+| Фича | Описание |
 |---|---|
-| 🔄 **FSM Core** | Finite State Machine with clean state transitions for button press, hold, release |
-| 🪟 **WinAPI Simulator** | Win32-compatible hardware abstraction layer — no real hardware needed |
-| 🧪 **Unit Tests** | Full test suite in C with pass/fail reporting via `test_btn.c` |
-| 🐳 **Dockerized Builds** | Reproducible cross-compilation in an isolated container |
-| ⚙️ **GitHub Actions CI/CD** | Automated build, test, and artifact pipeline on every push |
-| 🔁 **Cross-compilation** | Windows `.exe` built from Linux using `mingw-w64` |
-| 📦 **Artifact Delivery** | Compiled `btnsim.exe` uploaded as a downloadable CI artifact |
+| 🔄 **FSM ядро** | Конечный автомат с состояниями IDLE / PRESSED / HELD / PENDING |
+| 🪟 **WinAPI симулятор** | Win32 GUI — 3 кнопки, лог событий, запуск тестов прямо в UI |
+| ⌨️ **Клавиатура** | Клавиши `1` `2` `3` — нажать, `Space` — отпустить все |
+| 🧪 **Юнит-тесты** | 7 тестов в `test_btn.c` и встроенные тесты в UI |
+| 🐳 **Docker** | Воспроизводимая сборка в изолированном контейнере |
+| ⚙️ **GitHub Actions** | 3-стадийный пайплайн: анализ → тесты → сборка |
+| 🔁 **Кросс-компиляция** | `btnsim.exe` собирается из Linux через `mingw-w64` |
+| 📦 **Артефакт** | Готовый `.exe` скачивается из CI без сборки |
 
 ---
 
-## 🗂 Project Structure
+## Структура проекта
 
 ```
 btnsim-devops/
 ├── .github/
 │   └── workflows/
-│       └── ci.yml              # GitHub Actions pipeline
+│       └── ci.yml              # GitHub Actions: 3 jobs
 ├── build/
-│   ├── btnsim.exe              # Compiled Windows binary (CI artifact)
-│   └── test_btn                # Test runner binary (Linux)
+│   ├── btnsim.exe              # Windows binary (CI artifact)
+│   └── test_btn                # Linux test runner
 ├── core/
-│   ├── btn_fsm.c               # FSM implementation
-│   └── btn_fsm.h               # FSM state definitions & API
+│   ├── btn_fsm.c               # FSM — единственный источник истины
+│   └── btn_fsm.h               # Типы, константы, API
 ├── simulator/
-│   └── btnsim_win32.c          # WinAPI hardware simulator layer
+│   └── btnsim_win32.c          # WinAPI GUI, использует core/btn_fsm.c
 ├── tests/
-│   └── test_btn.c              # Unit tests
-├── Dockerfile                  # Build environment
-├── Makefile                    # Build targets
+│   └── test_btn.c              # CLI unit tests
+├── Dockerfile
+├── Makefile
 └── README.md
 ```
 
 ---
 
-## 🔬 FSM Architecture
+## FSM — архитектура
 
-The button logic is modeled as a deterministic finite state machine:
+Кнопка моделируется как детерминированный конечный автомат с 4 состояниями:
 
 ```
-         PRESS                 HOLD_TIMEOUT
-  IDLE ─────────► PRESSED ──────────────────► HELD
-   ▲                │                          │
-   │    RELEASE     │           RELEASE        │
-   └────────────────┘◄─────────────────────────┘
+                PRESS
+  IDLE ──────────────────► PRESSED ──── hold >= 800ms ──► HELD
+   ▲                          │                             │
+   │                          │ release                     │ release
+   │                          ▼                             ▼
+   │ timeout            PENDING                           IDLE
+   │ >= 400ms               │
+   └────────────────────────┘
+          или второй клик в течение 400ms → DOUBLE_CLICK → IDLE
 ```
 
-**States:** `IDLE` → `PRESSED` → `HELD`  
-**Events:** `BTN_PRESS`, `BTN_RELEASE`, `BTN_HOLD_TIMEOUT`
+**Состояния:**
 
-The FSM is implemented in `core/btn_fsm.c` and is fully decoupled from the hardware layer, making it portable to any platform.
+| Состояние | Описание |
+|---|---|
+| `BTN_IDLE` | Кнопка не нажата |
+| `BTN_PRESSED` | Кнопка зажата, ждём long press или release |
+| `BTN_HELD` | Long press сработал |
+| `BTN_PENDING` | Первый клик отпущен, ждём второй (double-click окно 400ms) |
+
+**События:**
+
+| Событие | Условие |
+|---|---|
+| `EVENT_SHORT_CLICK` | Отпущена, второго клика не было за 400ms |
+| `EVENT_DOUBLE_CLICK` | Два клика в пределах 400ms |
+| `EVENT_LONG_PRESS` | Удержание >= 800ms |
+| `EVENT_LONG_PRESS_RELEASE` | Отпущена после long press |
+
+> `SHORT_CLICK` никогда не возвращается сразу на `btn_release()` —  
+> он приходит из `btn_update()` после истечения double-click окна.  
+> Это ключевое отличие от наивной реализации.
 
 ---
 
-## 🚀 Getting Started
+## Быстрый старт
 
-### Prerequisites
-
-- Docker (recommended)
-- OR: `gcc`, `make`, `mingw-w64` (for cross-compilation)
-
-### Build with Docker
+### Docker (рекомендуется)
 
 ```bash
-# Clone the repo
 git clone https://github.com/yuraodegov/btnsim-devops.git
 cd btnsim-devops
 
-# Build inside Docker
 docker build -t btnsim .
-docker run --rm -v $(pwd)/build:/app/build btnsim
+docker run --rm btnsim make run-tests
 ```
 
-### Build locally (Linux)
+### Локально (Linux)
 
 ```bash
-make all        # Build everything
-make test       # Run unit tests
-make clean      # Clean build artifacts
+make test       # сборка + компиляция тестов
+make run-tests  # запуск тестов
+make analyze    # статический анализ (cppcheck)
+make win-build  # кросс-компиляция btnsim.exe
+make clean      # очистка
 ```
 
-### Run on Windows
+### Windows
 
-After CI completes, download `btnsim.exe` from **Actions → Artifacts** and run it directly — no install needed.
+Скачать `btnsim.exe` из **Actions → Artifacts → btnsim-windows-{sha}** и запустить — установка не нужна.
 
 ---
 
-## ⚙️ CI/CD Pipeline
-
-The GitHub Actions workflow triggers on every `push` and `pull_request`:
+## CI/CD пайплайн
 
 ```
-push / PR
-    │
-    ▼
-┌─────────────────────────────┐
-│  1. Checkout code           │
-│  2. Build Docker image      │
-│  3. Compile (cross to Win)  │
-│  4. Run unit tests          │
-│  5. Upload btnsim.exe       │  ◄─── downloadable artifact
-└─────────────────────────────┘
+push / pull_request → main
+         │
+         ▼
+  ┌─────────────┐
+  │  1. analyze │  cppcheck --error-exitcode=1
+  └──────┬──────┘
+         │ success
+         ▼
+  ┌─────────────┐
+  │  2. test    │  make run-tests  (7 тестов)
+  └──────┬──────┘
+         │ success
+         ▼
+  ┌───────────────────┐
+  │  3. build-windows │  mingw → btnsim.exe → artifact (30 дней)
+  └───────────────────┘
 ```
 
-Pipeline config: [`.github/workflows/ci.yml`](.github/workflows/ci.yml)
+- Docker image кешируется через `type=gha` — повторные пуши собираются за секунды
+- Windows сборка запускается **только** если тесты прошли
+- Артефакт именуется `btnsim-windows-{git-sha}` для трассировки
 
 ---
 
-## 🧪 Tests
+## Тесты
 
-Unit tests cover all major FSM transitions:
-
-```bash
-$ make test
-[PASS] test_idle_to_pressed
-[PASS] test_pressed_to_held
-[PASS] test_held_to_idle_on_release
-[PASS] test_invalid_event_ignored
-...
-All tests passed.
+```
+=====================================
+BTNSIM TEST RUNNER
+=====================================
+[PASS] test_short_click
+[PASS] test_long_press
+[PASS] test_double_click
+[PASS] test_press_no_release
+[PASS] test_multi_btn
+[PASS] test_boundary
+[PASS] test_idle_init
+-------------------------------------
+RESULT: 7/7 PASSED
+=====================================
 ```
 
 ---
 
-## 🛠 Tech Stack
+## Стек
 
-- **Language:** C (C99)
-- **Build:** GNU Make + Dockerfile
-- **Cross-compiler:** `x86_64-w64-mingw32-gcc`
-- **CI:** GitHub Actions (`ubuntu-latest`)
-- **Target OS:** Windows x64
+| | |
+|---|---|
+| Язык | C99 |
+| Сборка | GNU Make + Dockerfile |
+| Кросс-компилятор | `x86_64-w64-mingw32-gcc` |
+| Статический анализ | `cppcheck` |
+| CI | GitHub Actions (`ubuntu-latest`) |
+| Целевая ОС | Windows x64 |
 
 ---
 
-## 📄 License
+## Лицензия
 
-MIT — use freely, credit appreciated.
+MIT — используй свободно, ссылка приветствуется.
 
 ---
 

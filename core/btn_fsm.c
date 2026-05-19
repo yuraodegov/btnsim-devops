@@ -1,4 +1,6 @@
 #include "btn_fsm.h"
+#include <stdlib.h>
+#include <stdio.h>
 
 void btn_init(BtnFSM *btn)
 {
@@ -7,6 +9,7 @@ void btn_init(BtnFSM *btn)
     btn->last_release = 0;
     btn->long_fired   = 0;
     btn->is_pressed   = 0;
+    printf("HELLO TESTER\n");
 }
 
 BtnEvent btn_press(BtnFSM *btn, uint32_t tick)
