@@ -221,6 +221,55 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         break;
     }
 
+    case WM_KEYDOWN:
+{
+    switch(wp)
+    {
+    case '1':
+        OnBtnPress(0);
+        return 0;
+
+    case '2':
+        OnBtnPress(1);
+        return 0;
+
+    case '3':
+        OnBtnPress(2);
+        return 0;
+    }
+
+    break;
+}
+
+case WM_KEYUP:
+{
+    switch(wp)
+    {
+    case '1':
+        OnBtnRelease(0);
+        return 0;
+
+    case '2':
+        OnBtnRelease(1);
+        return 0;
+
+    case '3':
+        OnBtnRelease(2);
+        return 0;
+
+    case VK_SPACE:
+
+        for(int i = 0; i < NUM_BUTTONS; i++)
+        {
+            OnBtnRelease(i);
+        }
+
+        return 0;
+    }
+
+    break;
+}
+
     case WM_TIMER:
         if (wp == TIMER_POLL_ID) {
             UpdateHoldLabels();
