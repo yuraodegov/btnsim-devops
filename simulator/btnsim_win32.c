@@ -211,8 +211,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         SetTimer(hwnd, TIMER_POLL_ID, TIMER_POLL_MS, NULL);
 
         AppendLog("[BTNSIM] simulator started");
-        AppendLog("[BTNSIM] FSM: core/btn_fsm.c  |  long=" STR(LONG_PRESS_MS) "ms"
-                  "  double=" STR(DOUBLE_CLICK_MS) "ms");
+        AppendLog("[BTNSIM] FSM: core/btn_fsm.c  |  long=800ms  double=400ms");
         AppendLog("[BTNSIM] -----------------------------------------------------------");
         break;
     }
