@@ -26,9 +26,9 @@
 ## Что это?
 
 **BTNSIM-DEVOPS** — симулятор аппаратной кнопки на C с FSM-архитектурой и WinAPI-интерфейсом.  
-Демонстрирует embedded-стиль разработки с полным DevOps-пайплайном: Docker, GitHub Actions, кросс-компиляция Linux → Windows.
+Демонстрирует embedded-стиль разработки с полным DevOps-пайплайном: Docker, GitHub Actions, кросс-компиляция Linux → Windows, GUI автотесты.
 
-> Собирается на Linux. Запускается на Windows. Тестируется автоматически.
+> Собирается на Linux. Запускается на Windows. Тестируется автоматически на обеих платформах.
 
 ---
 
@@ -36,14 +36,15 @@
 
 | Фича | Описание |
 |---|---|
-| 🔄 **FSM ядро** | Конечный автомат с состояниями IDLE / PRESSED / HELD / PENDING |
-| 🪟 **WinAPI симулятор** | Win32 GUI — 3 кнопки, лог событий, запуск тестов прямо в UI |
+| 🔄 **FSM ядро** | Конечный автомат: IDLE / PRESSED / HELD / PENDING |
+| 🪟 **WinAPI симулятор** | Win32 GUI — 3 кнопки, лог событий, встроенные тесты |
 | ⌨️ **Клавиатура** | Клавиши `1` `2` `3` — нажать, `Space` — отпустить все |
-| 🧪 **Юнит-тесты** | 7 тестов в `test_btn.c` и встроенные тесты в UI |
+| 🧪 **Юнит-тесты** | 7 тестов в `test_btn.c` (Linux, C99) |
+| 🖥️ **GUI тесты** | 9 smoke-тестов через pywinauto (Windows CI) |
 | 🐳 **Docker** | Воспроизводимая сборка в изолированном контейнере |
-| ⚙️ **GitHub Actions** | 3-стадийный пайплайн: анализ → тесты → сборка |
+| ⚙️ **GitHub Actions** | 4-стадийный пайплайн: анализ → тесты → сборка → GUI тесты |
 | 🔁 **Кросс-компиляция** | `btnsim.exe` собирается из Linux через `mingw-w64` |
-| 📦 **Артефакт** | Готовый `.exe` скачивается из CI без сборки |
+| 📦 **Артефакт** | Готовый `.exe` после прохождения всех тестов |
 
 ---
 
@@ -53,17 +54,20 @@
 btnsim-devops/
 ├── .github/
 │   └── workflows/
-│       └── ci.yml              # GitHub Actions: 3 jobs
+│       └── ci.yml              # GitHub Actions: 4 jobs
 ├── build/
 │   ├── btnsim.exe              # Windows binary (CI artifact)
 │   └── test_btn                # Linux test runner
 ├── core/
 │   ├── btn_fsm.c               # FSM — единственный источник истины
 │   └── btn_fsm.h               # Типы, константы, API
+├── gui_tests/
+│   ├── test_gui.py             # pywinauto GUI smoke tests (9 тестов)
+│   └── requirements.txt        # pywinauto, pytest
 ├── simulator/
 │   └── btnsim_win32.c          # WinAPI GUI, использует core/btn_fsm.c
 ├── tests/
-│   └── test_btn.c              # CLI unit tests
+│   └── test_btn.c              # CLI unit tests (7 тестов)
 ├── Dockerfile
 ├── Makefile
 └── README.md
@@ -73,47 +77,34 @@ btnsim-devops/
 
 ## FSM — архитектура
 
-Кнопка моделируется как детерминированный конечный автомат с 4 состояниями:
-
 ```
                 PRESS
   IDLE ──────────────────► PRESSED ──── hold >= 800ms ──► HELD
    ▲                          │                             │
    │                          │ release                     │ release
    │                          ▼                             ▼
-   │ timeout            PENDING                           IDLE
-   │ >= 400ms               │
-   └────────────────────────┘
-          или второй клик в течение 400ms → DOUBLE_CLICK → IDLE
+   │ timeout >= 400ms     PENDING                         IDLE
+   └──────────────────────────┤
+                              │ второй клик < 400ms
+                              ▼
+                        DOUBLE_CLICK → IDLE
 ```
-
-**Состояния:**
 
 | Состояние | Описание |
 |---|---|
 | `BTN_IDLE` | Кнопка не нажата |
-| `BTN_PRESSED` | Кнопка зажата, ждём long press или release |
+| `BTN_PRESSED` | Зажата, ждём long press или release |
 | `BTN_HELD` | Long press сработал |
-| `BTN_PENDING` | Первый клик отпущен, ждём второй (double-click окно 400ms) |
+| `BTN_PENDING` | Первый клик отпущен, ждём второй (400ms окно) |
 
-**События:**
-
-| Событие | Условие |
-|---|---|
-| `EVENT_SHORT_CLICK` | Отпущена, второго клика не было за 400ms |
-| `EVENT_DOUBLE_CLICK` | Два клика в пределах 400ms |
-| `EVENT_LONG_PRESS` | Удержание >= 800ms |
-| `EVENT_LONG_PRESS_RELEASE` | Отпущена после long press |
-
-> `SHORT_CLICK` никогда не возвращается сразу на `btn_release()` —  
-> он приходит из `btn_update()` после истечения double-click окна.  
-> Это ключевое отличие от наивной реализации.
+> `SHORT_CLICK` никогда не возвращается сразу из `btn_release()` —  
+> приходит из `btn_update()` после истечения double-click окна.
 
 ---
 
 ## Быстрый старт
 
-### Docker (рекомендуется)
+### Docker
 
 ```bash
 git clone https://github.com/yuraodegov/btnsim-devops.git
@@ -123,11 +114,10 @@ docker build -t btnsim .
 docker run --rm btnsim make run-tests
 ```
 
-### Локально (Linux)
+### Локально (Linux / Codespaces)
 
 ```bash
-make test       # сборка + компиляция тестов
-make run-tests  # запуск тестов
+make run-tests  # запуск unit tests
 make analyze    # статический анализ (cppcheck)
 make win-build  # кросс-компиляция btnsim.exe
 make clean      # очистка
@@ -135,7 +125,7 @@ make clean      # очистка
 
 ### Windows
 
-Скачать `btnsim.exe` из **Actions → Artifacts → btnsim-windows-{sha}** и запустить — установка не нужна.
+Скачать `btnsim.exe` из **Actions → Artifacts → btnsim-windows-{sha}** и запустить.
 
 ---
 
@@ -146,27 +136,39 @@ push / pull_request → main
          │
          ▼
   ┌─────────────┐
-  │  1. analyze │  cppcheck --error-exitcode=1
+  │  1. analyze │  cppcheck (ubuntu-latest)
   └──────┬──────┘
          │ success
          ▼
   ┌─────────────┐
-  │  2. test    │  make run-tests  (7 тестов)
+  │  2. test    │  7 unit tests в Docker (ubuntu-latest)
   └──────┬──────┘
          │ success
          ▼
   ┌───────────────────┐
-  │  3. build-windows │  mingw → btnsim.exe → artifact (30 дней)
-  └───────────────────┘
+  │  3. build-windows │  mingw cross-compile → btnsim.exe
+  └──────┬────────────┘
+         │ success
+         ▼
+  ┌───────────────────┐
+  │  4. gui-test      │  9 smoke tests via pywinauto (windows-latest)
+  └──────┬────────────┘
+         │ success
+         ▼
+      artifact
+  btnsim-windows-{sha}
+     (30 дней)
 ```
 
-- Docker image кешируется через `type=gha` — повторные пуши собираются за секунды
-- Windows сборка запускается **только** если тесты прошли
-- Артефакт именуется `btnsim-windows-{git-sha}` для трассировки
+- Docker image кешируется через `type=gha`
+- Каждый следующий job запускается только если предыдущий прошёл
+- `.exe` артефакт передаётся между jobs через `upload-artifact` / `download-artifact`
 
 ---
 
 ## Тесты
+
+### Unit tests (Linux)
 
 ```
 =====================================
@@ -175,13 +177,28 @@ BTNSIM TEST RUNNER
 [PASS] test_short_click
 [PASS] test_long_press
 [PASS] test_double_click
-[PASS] test_press_no_release
-[PASS] test_multi_btn
 [PASS] test_boundary
+[PASS] test_no_double_after_timeout
+[PASS] test_long_press_no_repeat
 [PASS] test_idle_init
 -------------------------------------
 RESULT: 7/7 PASSED
 =====================================
+```
+
+### GUI smoke tests (Windows CI)
+
+```
+gui_tests/test_gui.py::test_window_opens          PASSED
+gui_tests/test_gui.py::test_initial_log           PASSED
+gui_tests/test_gui.py::test_buttons_exist         PASSED
+gui_tests/test_gui.py::test_run_tests_button_exists PASSED
+gui_tests/test_gui.py::test_clear_log_button_exists PASSED
+gui_tests/test_gui.py::test_run_all_tests_passes  PASSED
+gui_tests/test_gui.py::test_clear_log             PASSED
+gui_tests/test_gui.py::test_status_bar_exists     PASSED
+gui_tests/test_gui.py::test_log_edit_exists       PASSED
+9 passed in Xs
 ```
 
 ---
@@ -194,7 +211,9 @@ RESULT: 7/7 PASSED
 | Сборка | GNU Make + Dockerfile |
 | Кросс-компилятор | `x86_64-w64-mingw32-gcc` |
 | Статический анализ | `cppcheck` |
-| CI | GitHub Actions (`ubuntu-latest`) |
+| Unit tests | C99, самописный test runner |
+| GUI tests | Python 3.12 + pywinauto |
+| CI | GitHub Actions (`ubuntu-latest` + `windows-latest`) |
 | Целевая ОС | Windows x64 |
 
 ---
