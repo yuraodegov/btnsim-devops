@@ -86,12 +86,11 @@ def test_run_all_tests_passes(win):
 # ── тест 7 ──────────────────────────────────────────────────────────────────
 def test_clear_log(win):
     """CLEAR LOG очищает лог."""
-    clear_btn = win.child_window(title_re=".*CLEAR.*", class_name="Button")
-    clear_btn.click()
+    clear_btn = win.child_window(title="X  CLEAR LOG", class_name="Button")
+    clear_btn.click_input()
     time.sleep(0.5)
 
     log = get_log(win)
-    # после очистки лог короткий — только строка "log cleared"
     assert "log cleared" in log, f"expected 'log cleared', got:\n{log[-200:]}"
 
 
