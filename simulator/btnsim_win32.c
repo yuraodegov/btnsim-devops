@@ -1,9 +1,13 @@
 /*
  * BTNSIM - Button Hardware Simulator
- * WinAPI single-file C, ANSI build
+ * WinAPI single-file C, uses core/btn_fsm.c for FSM logic
  *
- * Compile (MSYS2 MINGW64 terminal):
- *   gcc btnsim.c -o btnsim.exe -lcomctl32 -lgdi32 -luser32 -Wall -O2 -Wl,--subsystem,windows
+ * Compile (from repo root, MSYS2 MINGW64):
+ *   gcc simulator/btnsim_win32.c core/btn_fsm.c -o build/btnsim.exe \
+ *       -lcomctl32 -lgdi32 -luser32 -Wall -O2 -Wl,--subsystem,windows
+ *
+ * Or via Makefile:
+ *   make win-build
  */
 
 #define WIN32_LEAN_AND_MEAN
@@ -13,13 +17,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "../core/btn_fsm.h"   /* single source of truth for FSM */
+
 /* ── constants ─────────────────────────────────────────────────────────── */
 
 #define NUM_BUTTONS     3
-#define LONG_PRESS_MS   800
-#define DOUBLE_CLICK_MS 400
 #define TIMER_POLL_ID   1
-#define TIMER_POLL_MS   30
+#define TIMER_POLL_MS   16          /* ~60 Hz poll for smooth hold counter  */
 #define MAX_LOG_BYTES   (300*200)
 #define LOG_LINE_MAX    256
 
@@ -38,19 +42,6 @@
 #define CLR_WARN        RGB(255, 209, 102)
 #define CLR_DIM         RGB(74,  80,  96)
 
-/* ── FSM ───────────────────────────────────────────────────────────────── */
-
-typedef enum { BTN_IDLE=0, BTN_PRESSED, BTN_HELD } BtnState;
-
-typedef struct {
-    BtnState state;
-    DWORD    press_tick;
-    DWORD    last_release;
-    int      click_count;
-    int      long_fired;
-    int      is_held;
-} BtnFSM;
-
 /* ── globals ───────────────────────────────────────────────────────────── */
 
 static HWND   g_hwnd;
@@ -60,8 +51,7 @@ static HWND   g_hbtn[NUM_BUTTONS];
 static HWND   g_hholdlabel[NUM_BUTTONS];
 static HWND   g_hstatelabel[NUM_BUTTONS];
 
-static BtnFSM g_fsm[NUM_BUTTONS];
-static int    g_btn_pressed[NUM_BUTTONS];
+static BtnFSM g_fsm[NUM_BUTTONS];   /* from core/btn_fsm.h */
 
 static HFONT  g_font_mono;
 static HFONT  g_font_bold;
@@ -76,6 +66,7 @@ static char   g_log_buf[MAX_LOG_BYTES];
 
 LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
 LRESULT CALLBACK BtnSubclassProc(HWND, UINT, WPARAM, LPARAM, UINT_PTR, DWORD_PTR);
+
 static void AppendLog(const char *line);
 static void OnBtnPress(int idx);
 static void OnBtnRelease(int idx);
@@ -105,7 +96,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow)
                     OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,
                     FIXED_PITCH|FF_MODERN,"Consolas");
 
-    WNDCLASSEXA wc = {0};
+    WNDCLASSEXA wc  = {0};
     wc.cbSize        = sizeof(wc);
     wc.style         = CS_HREDRAW|CS_VREDRAW;
     wc.lpfnWndProc   = WndProc;
@@ -115,6 +106,10 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow)
     wc.lpszClassName = "BtnSimClass";
     wc.hIcon         = LoadIcon(NULL, IDI_APPLICATION);
     RegisterClassExA(&wc);
+
+    /* init FSM for all buttons */
+    for (int i = 0; i < NUM_BUTTONS; i++)
+        btn_init(&g_fsm[i]);
 
     g_hwnd = CreateWindowExA(0, "BtnSimClass",
         "BTNSIM  //  hardware button simulator",
@@ -216,82 +211,37 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         SetTimer(hwnd, TIMER_POLL_ID, TIMER_POLL_MS, NULL);
 
         AppendLog("[BTNSIM] simulator started");
-        AppendLog("[BTNSIM] long_press_threshold: 800ms  |  double_click_window: 400ms");
+        AppendLog("[BTNSIM] FSM: core/btn_fsm.c  |  long=" STR(LONG_PRESS_MS) "ms"
+                  "  double=" STR(DOUBLE_CLICK_MS) "ms");
         AppendLog("[BTNSIM] -----------------------------------------------------------");
         break;
     }
 
-    case WM_KEYDOWN:
-{
-    switch(wp)
-    {
-    case '1':
-        OnBtnPress(0);
-        return 0;
-
-    case '2':
-        OnBtnPress(1);
-        return 0;
-
-    case '3':
-        OnBtnPress(2);
-        return 0;
-    }
-
-    break;
-}
-
-case WM_KEYUP:
-{
-    switch(wp)
-    {
-    case '1':
-        OnBtnRelease(0);
-        return 0;
-
-    case '2':
-        OnBtnRelease(1);
-        return 0;
-
-    case '3':
-        OnBtnRelease(2);
-        return 0;
-
-    case VK_SPACE:
-
-        for(int i = 0; i < NUM_BUTTONS; i++)
-        {
-            OnBtnRelease(i);
-        }
-
-        return 0;
-    }
-
-    break;
-}
-
     case WM_TIMER:
         if (wp == TIMER_POLL_ID) {
-            UpdateHoldLabels();
             DWORD now = GetTickCount();
             for (int i = 0; i < NUM_BUTTONS; i++) {
-                if (g_btn_pressed[i] &&
-                    g_fsm[i].state == BTN_PRESSED &&
-                    !g_fsm[i].long_fired &&
-                    (now - g_fsm[i].press_tick) >= LONG_PRESS_MS)
-                {
-                    g_fsm[i].state      = BTN_HELD;
-                    g_fsm[i].long_fired = 1;
-                    g_fsm[i].is_held    = 1;
+                BtnEvent ev = btn_update(&g_fsm[i], now);
+                if (ev == EVENT_LONG_PRESS) {
                     char buf[LOG_LINE_MAX];
-                    sprintf(buf, "[EVENT]  btn=%d  action=long_press  held_ms=%lu  state=HELD",
+                    _snprintf(buf, sizeof(buf),
+                        "[EVENT]  btn=%d  action=long_press  held_ms=%lu  state=HELD",
                         i+1, (unsigned long)(now - g_fsm[i].press_tick));
                     AppendLog(buf);
                     SendMessage(g_hstatus, SB_SETTEXTA, 0, (LPARAM)"  LONG PRESS detected");
                     InvalidateRect(g_hbtn[i], NULL, TRUE);
                     UpdateStateLabel(i);
                 }
+                if (ev == EVENT_SHORT_CLICK) {
+                    /* pending single click resolved after DOUBLE_CLICK_MS timeout */
+                    char buf[LOG_LINE_MAX];
+                    _snprintf(buf, sizeof(buf),
+                        "[EVENT]  btn=%d  action=short_click  state=IDLE", i+1);
+                    AppendLog(buf);
+                    UpdateStateLabel(i);
+                }
             }
+            UpdateHoldLabels();
         }
         break;
 
@@ -305,12 +255,12 @@ case WM_KEYUP:
 
         HDC  hdc     = di->hDC;
         RECT rc      = di->rcItem;
-        int  pressed = g_btn_pressed[idx];
-        int  held    = g_fsm[idx].is_held;
+        int  pressed = g_fsm[idx].is_pressed;
+        int  held    = (g_fsm[idx].state == BTN_HELD);
 
         COLORREF bgcol = pressed ? CLR_ACCENT : held ? CLR_ACCENT2 : CLR_BG;
         COLORREF fgcol = pressed ? RGB(0,0,0) : CLR_ACCENT;
-        COLORREF brcol = held ? CLR_ACCENT2 : CLR_ACCENT;
+        COLORREF brcol = held    ? CLR_ACCENT2 : CLR_ACCENT;
 
         SetBkMode(hdc, TRANSPARENT);
 
@@ -343,14 +293,15 @@ case WM_KEYUP:
             if (hctl == g_hstatelabel[i]) {
                 SetBkColor(hdc, CLR_BG);
                 SetTextColor(hdc,
-                    g_fsm[i].state == BTN_HELD    ? CLR_WARN :
-                    g_fsm[i].state == BTN_PRESSED ? CLR_ACCENT :
-                                                     CLR_DIM);
+                    g_fsm[i].state == BTN_HELD     ? CLR_WARN    :
+                    g_fsm[i].state == BTN_PRESSED  ? CLR_ACCENT  :
+                    g_fsm[i].state == BTN_PENDING  ? CLR_ACCENT2 :
+                                                      CLR_DIM);
                 return (LRESULT)g_br_bg;
             }
             if (hctl == g_hholdlabel[i]) {
                 SetBkColor(hdc, CLR_BG);
-                SetTextColor(hdc, g_btn_pressed[i] ? CLR_WARN : CLR_DIM);
+                SetTextColor(hdc, g_fsm[i].is_pressed ? CLR_WARN : CLR_DIM);
                 return (LRESULT)g_br_bg;
             }
         }
@@ -379,13 +330,13 @@ case WM_KEYUP:
         break;
 
     case WM_KEYDOWN:
-        if (lp & (1<<30)) break;
+        if (lp & (1<<30)) break;   /* ignore key repeat */
         if (wp == '1') OnBtnPress(0);
         if (wp == '2') OnBtnPress(1);
         if (wp == '3') OnBtnPress(2);
         if (wp == VK_SPACE) {
             for (int i = 0; i < NUM_BUTTONS; i++)
-                if (g_btn_pressed[i]) OnBtnRelease(i);
+                if (g_fsm[i].is_pressed) OnBtnRelease(i);
         }
         break;
 
@@ -397,7 +348,7 @@ case WM_KEYUP:
 
     case WM_ERASEBKGND:
     {
-        HDC hdc = (HDC)wp;
+        HDC  hdc = (HDC)wp;
         RECT rc;
         GetClientRect(hwnd, &rc);
         FillRect(hdc, &rc, g_br_bg);
@@ -426,72 +377,79 @@ LRESULT CALLBACK BtnSubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
     case WM_LBUTTONDOWN: SetCapture(hwnd); OnBtnPress(idx);   return 0;
     case WM_LBUTTONUP:   ReleaseCapture(); OnBtnRelease(idx); return 0;
     case WM_CAPTURECHANGED:
-        if (g_btn_pressed[idx]) OnBtnRelease(idx);
+        if (g_fsm[idx].is_pressed) OnBtnRelease(idx);
         return 0;
     }
     return DefSubclassProc(hwnd, msg, wp, lp);
 }
 
-/* ── FSM logic ─────────────────────────────────────────────────────────── */
+/* ── FSM event handlers ────────────────────────────────────────────────── */
 
 static void OnBtnPress(int idx)
 {
-    if (g_btn_pressed[idx]) return;
-    g_btn_pressed[idx]    = 1;
-    g_fsm[idx].press_tick = GetTickCount();
-    g_fsm[idx].long_fired = 0;
-    g_fsm[idx].is_held    = 0;
-    g_fsm[idx].state      = BTN_PRESSED;
+    DWORD now = GetTickCount();
+    BtnEvent ev = btn_press(&g_fsm[idx], now);
+    if (ev == EVENT_NONE) return;   /* already pressed */
 
     char buf[LOG_LINE_MAX];
-    sprintf(buf, "[EVENT]  btn=%d  action=press  state=PRESSED", idx+1);
+    _snprintf(buf, sizeof(buf),
+        "[EVENT]  btn=%d  action=press  state=%s",
+        idx+1, btn_state_str(g_fsm[idx].state));
     AppendLog(buf);
 
     InvalidateRect(g_hbtn[idx], NULL, TRUE);
     UpdateStateLabel(idx);
 
     char sb[64];
-    sprintf(sb, "  BTN%d  PRESSED", idx+1);
+    _snprintf(sb, sizeof(sb), "  BTN%d  PRESSED", idx+1);
     SendMessage(g_hstatus, SB_SETTEXTA, 0, (LPARAM)sb);
 }
 
 static void OnBtnRelease(int idx)
 {
-    if (!g_btn_pressed[idx]) return;
-    g_btn_pressed[idx] = 0;
+    DWORD now = GetTickCount();
+    BtnEvent ev = btn_release(&g_fsm[idx], now);
+    if (ev == EVENT_NONE) {
+        /*
+         * EVENT_NONE on release = first click, FSM went PENDING.
+         * SHORT_CLICK will fire from btn_update() after DOUBLE_CLICK_MS.
+         * Just update visuals here.
+         */
+        UpdateStateLabel(idx);
+        InvalidateRect(g_hbtn[idx], NULL, TRUE);
 
-    DWORD now  = GetTickCount();
-    DWORD held = now - g_fsm[idx].press_tick;
-    char  buf[LOG_LINE_MAX];
-
-    if (g_fsm[idx].state == BTN_HELD) {
-        sprintf(buf, "[EVENT]  btn=%d  action=long_press_release  held_ms=%lu  state=IDLE",
-            idx+1, (unsigned long)held);
-        AppendLog(buf);
-    } else {
-        DWORD since = now - g_fsm[idx].last_release;
-        if (g_fsm[idx].click_count > 0 && since < DOUBLE_CLICK_MS) {
-            g_fsm[idx].click_count = 0;
-            sprintf(buf, "[EVENT]  btn=%d  action=double_click  held_ms=%lu  state=IDLE",
-                idx+1, (unsigned long)held);
-            AppendLog(buf);
-        } else {
-            g_fsm[idx].click_count = 1;
-            sprintf(buf, "[EVENT]  btn=%d  action=short_click  held_ms=%lu  state=IDLE",
-                idx+1, (unsigned long)held);
-            AppendLog(buf);
-        }
+        char sb[64];
+        _snprintf(sb, sizeof(sb), "  BTN%d  pending double-click...", idx+1);
+        SendMessage(g_hstatus, SB_SETTEXTA, 0, (LPARAM)sb);
+        return;
     }
 
-    g_fsm[idx].last_release = now;
-    g_fsm[idx].state        = BTN_IDLE;
-    g_fsm[idx].is_held      = 0;
+    char buf[LOG_LINE_MAX];
+    DWORD held = now - g_fsm[idx].press_tick;
 
+    switch (ev) {
+    case EVENT_LONG_PRESS_RELEASE:
+        _snprintf(buf, sizeof(buf),
+            "[EVENT]  btn=%d  action=long_press_release  held_ms=%lu  state=IDLE",
+            idx+1, (unsigned long)held);
+        break;
+    case EVENT_DOUBLE_CLICK:
+        _snprintf(buf, sizeof(buf),
+            "[EVENT]  btn=%d  action=double_click  state=IDLE", idx+1);
+        break;
+    default:
+        _snprintf(buf, sizeof(buf),
+            "[EVENT]  btn=%d  action=%s  state=IDLE",
+            idx+1, btn_event_str(ev));
+        break;
+    }
+
+    AppendLog(buf);
     InvalidateRect(g_hbtn[idx], NULL, TRUE);
     UpdateStateLabel(idx);
 
     char sb[64];
-    sprintf(sb, "  BTN%d  IDLE  (held %lums)", idx+1, (unsigned long)held);
+    _snprintf(sb, sizeof(sb), "  BTN%d  %s", idx+1, btn_event_str(ev));
     SendMessage(g_hstatus, SB_SETTEXTA, 0, (LPARAM)sb);
 }
 
@@ -499,10 +457,7 @@ static void OnBtnRelease(int idx)
 
 static void UpdateStateLabel(int idx)
 {
-    const char *s =
-        g_fsm[idx].state == BTN_HELD    ? "HELD"    :
-        g_fsm[idx].state == BTN_PRESSED ? "PRESSED" : "IDLE";
-    SetWindowTextA(g_hstatelabel[idx], s);
+    SetWindowTextA(g_hstatelabel[idx], btn_state_str(g_fsm[idx].state));
     InvalidateRect(g_hstatelabel[idx], NULL, TRUE);
 }
 
@@ -510,9 +465,10 @@ static void UpdateHoldLabels(void)
 {
     DWORD now = GetTickCount();
     for (int i = 0; i < NUM_BUTTONS; i++) {
-        if (g_btn_pressed[i]) {
+        if (g_fsm[i].is_pressed) {
             char buf[32];
-            sprintf(buf, "%lu ms", (unsigned long)(now - g_fsm[i].press_tick));
+            _snprintf(buf, sizeof(buf),
+                "%lu ms", (unsigned long)(now - g_fsm[i].press_tick));
             SetWindowTextA(g_hholdlabel[i], buf);
         } else {
             SetWindowTextA(g_hholdlabel[i], "--");
@@ -526,7 +482,7 @@ static void AppendLog(const char *line)
     SYSTEMTIME st;
     GetLocalTime(&st);
     char ts[32];
-    sprintf(ts, "[%02d:%02d:%02d.%03d]  ",
+    _snprintf(ts, sizeof(ts), "[%02d:%02d:%02d.%03d]  ",
         st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
 
     char full[LOG_LINE_MAX];
@@ -550,121 +506,115 @@ static void AppendLog(const char *line)
     SendMessage(g_hlog, EM_LINESCROLL, 0, lines);
 }
 
-/* ── unit tests ────────────────────────────────────────────────────────── */
-
-typedef struct {
-    BtnFSM fsm;
-    int    pressed;
-    char   last_action[64];
-} TestCtx;
-
-static void t_press(TestCtx *c, DWORD tick) {
-    c->pressed=1; c->fsm.press_tick=tick;
-    c->fsm.long_fired=0; c->fsm.is_held=0;
-    c->fsm.state=BTN_PRESSED;
-    strcpy(c->last_action,"press");
-}
-static void t_advance(TestCtx *c, DWORD tick) {
-    if (c->pressed && c->fsm.state==BTN_PRESSED && !c->fsm.long_fired &&
-        (tick-c->fsm.press_tick)>=LONG_PRESS_MS) {
-        c->fsm.state=BTN_HELD; c->fsm.long_fired=1; c->fsm.is_held=1;
-        strcpy(c->last_action,"long_press");
-    }
-}
-static void t_release(TestCtx *c, DWORD tick) {
-    if (!c->pressed) return;
-    c->pressed=0;
-    if (c->fsm.state==BTN_HELD) {
-        strcpy(c->last_action,"long_press_release");
-    } else {
-        DWORD since=tick-c->fsm.last_release;
-        if (c->fsm.click_count>0 && since<DOUBLE_CLICK_MS) {
-            c->fsm.click_count=0;
-            strcpy(c->last_action,"double_click");
-        } else {
-            c->fsm.click_count=1;
-            strcpy(c->last_action,"short_click");
-        }
-    }
-    c->fsm.last_release=tick; c->fsm.state=BTN_IDLE; c->fsm.is_held=0;
-}
+/* ── unit tests (use core/btn_fsm.c directly) ──────────────────────────── */
 
 typedef struct { const char *name; int passed; char msg[256]; } TR;
 
-#define CHK_STR(a,b,m) \
-    if(strcmp(a,b)!=0){_snprintf(r->msg,sizeof(r->msg),"want '%s' got '%s' — %s",b,a,m);r->passed=0;return;}
-#define CHK_STATE(c,e,m) \
-    if((c).fsm.state!=(e)){_snprintf(r->msg,sizeof(r->msg),"state want %d got %d — %s",e,(c).fsm.state,m);r->passed=0;return;}
+#define CHK_INT(a, b, m) \
+    if ((a) != (b)) { \
+        _snprintf(r->msg, sizeof(r->msg), \
+            "want %d got %d -- %s", (int)(b), (int)(a), (m)); \
+        r->passed = 0; return; \
+    }
 
-static void test_short_click(TR *r){
-    r->passed=1; strcpy(r->msg,"OK"); TestCtx c={0};
-    t_press(&c,1000); t_advance(&c,1100); t_release(&c,1150);
-    CHK_STR(c.last_action,"short_click","action");
-    CHK_STATE(c,BTN_IDLE,"state");
+#define CHK_EV(ev, expected, m) CHK_INT((int)(ev), (int)(expected), m)
+
+/* short click: press, release, wait > DOUBLE_CLICK_MS → SHORT_CLICK */
+static void test_short_click(TR *r) {
+    r->passed = 1; strcpy(r->msg, "OK");
+    BtnFSM b; btn_init(&b);
+    btn_press(&b, 1000);
+    btn_release(&b, 1100);                  /* → PENDING */
+    BtnEvent ev = btn_update(&b, 1550);     /* 450ms timeout */
+    CHK_EV(ev, EVENT_SHORT_CLICK, "SHORT_CLICK after timeout");
+    CHK_INT(b.state, BTN_IDLE, "IDLE");
 }
-static void test_long_press(TR *r){
-    r->passed=1; strcpy(r->msg,"OK"); TestCtx c={0};
-    t_press(&c,2000); t_advance(&c,2900);
-    CHK_STR(c.last_action,"long_press","long fired");
-    CHK_STATE(c,BTN_HELD,"held");
-    t_release(&c,2950);
-    CHK_STR(c.last_action,"long_press_release","release");
-    CHK_STATE(c,BTN_IDLE,"idle");
+
+/* long press: hold 900ms → LONG_PRESS, release → LONG_PRESS_RELEASE */
+static void test_long_press(TR *r) {
+    r->passed = 1; strcpy(r->msg, "OK");
+    BtnFSM b; btn_init(&b);
+    btn_press(&b, 2000);
+    BtnEvent ev = btn_update(&b, 2900);
+    CHK_EV(ev, EVENT_LONG_PRESS, "LONG_PRESS");
+    CHK_INT(b.state, BTN_HELD, "HELD");
+    ev = btn_release(&b, 2950);
+    CHK_EV(ev, EVENT_LONG_PRESS_RELEASE, "LONG_PRESS_RELEASE");
+    CHK_INT(b.state, BTN_IDLE, "IDLE after release");
 }
-static void test_double_click(TR *r){
-    r->passed=1; strcpy(r->msg,"OK"); TestCtx c={0};
-    t_press(&c,3000); t_release(&c,3080);
-    t_press(&c,3200); t_release(&c,3260);
-    CHK_STR(c.last_action,"double_click","double");
+
+/* double click: two clicks within DOUBLE_CLICK_MS */
+static void test_double_click(TR *r) {
+    r->passed = 1; strcpy(r->msg, "OK");
+    BtnFSM b; btn_init(&b);
+    btn_press(&b, 3000); btn_release(&b, 3050);   /* first → PENDING */
+    btn_press(&b, 3150);
+    BtnEvent ev = btn_release(&b, 3200);           /* second within 400ms */
+    CHK_EV(ev, EVENT_DOUBLE_CLICK, "DOUBLE_CLICK");
+    CHK_INT(b.state, BTN_IDLE, "IDLE");
 }
-static void test_press_no_release(TR *r){
-    r->passed=1; strcpy(r->msg,"OK"); TestCtx c={0};
-    t_press(&c,5000); t_advance(&c,5100);
-    CHK_STATE(c,BTN_PRESSED,"still pressed");
+
+/* press without release: should stay PRESSED, no long yet */
+static void test_press_no_release(TR *r) {
+    r->passed = 1; strcpy(r->msg, "OK");
+    BtnFSM b; btn_init(&b);
+    btn_press(&b, 5000);
+    BtnEvent ev = btn_update(&b, 5100);
+    CHK_EV(ev, EVENT_NONE, "no event yet");
+    CHK_INT(b.state, BTN_PRESSED, "still PRESSED");
 }
-static void test_multi_btn(TR *r){
-    r->passed=1; strcpy(r->msg,"OK");
-    TestCtx c1={0},c2={0};
-    t_press(&c1,6000); t_press(&c2,6050);
-    t_release(&c1,6120); t_release(&c2,6180);
-    CHK_STR(c1.last_action,"short_click","btn1");
-    CHK_STR(c2.last_action,"short_click","btn2");
+
+/* two buttons independent */
+static void test_multi_btn(TR *r) {
+    r->passed = 1; strcpy(r->msg, "OK");
+    BtnFSM b1, b2; btn_init(&b1); btn_init(&b2);
+    btn_press(&b1, 6000); btn_press(&b2, 6050);
+    btn_release(&b1, 6120); btn_release(&b2, 6180);
+    BtnEvent e1 = btn_update(&b1, 6600);
+    BtnEvent e2 = btn_update(&b2, 6650);
+    CHK_EV(e1, EVENT_SHORT_CLICK, "btn1 SHORT_CLICK");
+    CHK_EV(e2, EVENT_SHORT_CLICK, "btn2 SHORT_CLICK");
 }
-static void test_boundary(TR *r){
-    r->passed=1; strcpy(r->msg,"OK");
-    TestCtx c={0};
-    t_press(&c,7000); t_advance(&c,7799);
-    if(c.fsm.state==BTN_HELD){strcpy(r->msg,"long fired too early at 799ms");r->passed=0;return;}
-    t_release(&c,7799);
-    CHK_STR(c.last_action,"short_click","799ms=short");
-    TestCtx c2={0};
-    t_press(&c2,8000); t_advance(&c2,8801);
-    CHK_STR(c2.last_action,"long_press","801ms=long");
+
+/* boundary: 799ms = no long, 800ms = long */
+static void test_boundary(TR *r) {
+    r->passed = 1; strcpy(r->msg, "OK");
+    BtnFSM b; btn_init(&b);
+    btn_press(&b, 7000);
+    BtnEvent ev = btn_update(&b, 7799);
+    CHK_EV(ev, EVENT_NONE, "no LONG_PRESS at 799ms");
+    CHK_INT(b.state, BTN_PRESSED, "PRESSED at 799ms");
+    ev = btn_update(&b, 7800);
+    CHK_EV(ev, EVENT_LONG_PRESS, "LONG_PRESS at 800ms");
 }
-static void test_idle_init(TR *r){
-    r->passed=1; strcpy(r->msg,"OK");
-    TestCtx c={0};
-    CHK_STATE(c,BTN_IDLE,"initial");
+
+/* initial state */
+static void test_idle_init(TR *r) {
+    r->passed = 1; strcpy(r->msg, "OK");
+    BtnFSM b; btn_init(&b);
+    CHK_INT(b.state,      BTN_IDLE, "state IDLE");
+    CHK_INT(b.is_pressed, 0,        "not pressed");
+    CHK_INT(b.long_fired, 0,        "long_fired=0");
 }
 
 static void RunAllTests(void)
 {
     AppendLog("");
     AppendLog("[TEST]  ==========================================");
-    AppendLog("[TEST]  Running 7 tests...");
+    AppendLog("[TEST]  Running 7 tests  (core/btn_fsm.c)");
 
     typedef void(*TFn)(TR*);
     struct { const char *name; TFn fn; } tests[] = {
-        {"test_short_click",          test_short_click},
-        {"test_long_press",           test_long_press},
-        {"test_double_click",         test_double_click},
-        {"test_press_no_release",     test_press_no_release},
-        {"test_multi_btn",            test_multi_btn},
-        {"test_boundary",             test_boundary},
-        {"test_idle_init",            test_idle_init},
+        {"test_short_click",      test_short_click},
+        {"test_long_press",       test_long_press},
+        {"test_double_click",     test_double_click},
+        {"test_press_no_release", test_press_no_release},
+        {"test_multi_btn",        test_multi_btn},
+        {"test_boundary",         test_boundary},
+        {"test_idle_init",        test_idle_init},
     };
     int n = (int)(sizeof(tests)/sizeof(tests[0]));
-    int passed=0, failed=0;
+    int passed = 0, failed = 0;
 
     for (int i = 0; i < n; i++) {
         TR r = {0}; r.name = tests[i].name;
@@ -672,18 +622,19 @@ static void RunAllTests(void)
         char buf[LOG_LINE_MAX];
         if (r.passed) {
             passed++;
-            _snprintf(buf,sizeof(buf),"[TEST]  PASSED  %s", r.name);
+            _snprintf(buf, sizeof(buf), "[TEST]  PASSED  %s", r.name);
         } else {
             failed++;
-            _snprintf(buf,sizeof(buf),"[TEST]  FAILED  %s  --  %s", r.name, r.msg);
+            _snprintf(buf, sizeof(buf), "[TEST]  FAILED  %s  --  %s",
+                r.name, r.msg);
         }
         AppendLog(buf);
     }
 
     AppendLog("[TEST]  ------------------------------------------");
     char sum[LOG_LINE_MAX];
-    _snprintf(sum, sizeof(sum), "[TEST]  %d passed  /  %d failed  /  %d total",
-        passed, failed, n);
+    _snprintf(sum, sizeof(sum),
+        "[TEST]  %d passed  /  %d failed  /  %d total", passed, failed, n);
     AppendLog(sum);
     AppendLog("[TEST]  ==========================================");
 
