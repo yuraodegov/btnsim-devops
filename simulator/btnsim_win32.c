@@ -17,13 +17,13 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../core/btn_fsm.h"   /* single source of truth for FSM */
+#include "../core/btn_fsm.h"
 
 /* ── constants ─────────────────────────────────────────────────────────── */
 
 #define NUM_BUTTONS     3
 #define TIMER_POLL_ID   1
-#define TIMER_POLL_MS   16          /* ~60 Hz poll for smooth hold counter  */
+#define TIMER_POLL_MS   16
 #define MAX_LOG_BYTES   (300*200)
 #define LOG_LINE_MAX    256
 
@@ -32,6 +32,7 @@
 #define ID_BTN3         103
 #define ID_RUN_TESTS    110
 #define ID_CLEAR_LOG    111
+#define ID_EXPORT       112
 #define ID_LOG_EDIT     120
 #define ID_STATUSBAR    130
 
@@ -42,6 +43,21 @@
 #define CLR_WARN        RGB(255, 209, 102)
 #define CLR_DIM         RGB(74,  80,  96)
 
+/* ── statistics ────────────────────────────────────────────────────────── */
+
+typedef struct {
+    int clicks;
+    int double_clicks;
+    int long_presses;
+} BtnStats;
+
+static BtnStats g_stats[NUM_BUTTONS];
+
+/* last test run results */
+static int g_test_passed = 0;
+static int g_test_failed = 0;
+static int g_test_ran    = 0;   /* 1 after first RUN */
+
 /* ── globals ───────────────────────────────────────────────────────────── */
 
 static HWND   g_hwnd;
@@ -51,7 +67,7 @@ static HWND   g_hbtn[NUM_BUTTONS];
 static HWND   g_hholdlabel[NUM_BUTTONS];
 static HWND   g_hstatelabel[NUM_BUTTONS];
 
-static BtnFSM g_fsm[NUM_BUTTONS];   /* from core/btn_fsm.h */
+static BtnFSM g_fsm[NUM_BUTTONS];
 
 static HFONT  g_font_mono;
 static HFONT  g_font_bold;
@@ -73,6 +89,7 @@ static void OnBtnRelease(int idx);
 static void UpdateHoldLabels(void);
 static void UpdateStateLabel(int idx);
 static void RunAllTests(void);
+static void ExportReport(void);
 
 /* ── WinMain ───────────────────────────────────────────────────────────── */
 
@@ -107,9 +124,12 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow)
     wc.hIcon         = LoadIcon(NULL, IDI_APPLICATION);
     RegisterClassExA(&wc);
 
-    /* init FSM for all buttons */
-    for (int i = 0; i < NUM_BUTTONS; i++)
+    for (int i = 0; i < NUM_BUTTONS; i++) {
         btn_init(&g_fsm[i]);
+        g_stats[i].clicks        = 0;
+        g_stats[i].double_clicks = 0;
+        g_stats[i].long_presses  = 0;
+    }
 
     g_hwnd = CreateWindowExA(0, "BtnSimClass",
         "BTNSIM  //  hardware button simulator",
@@ -194,13 +214,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
         HWND hrun = CreateWindowA("BUTTON", ">> RUN ALL TESTS",
             WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
-            x, by, 180, 36, hwnd, (HMENU)ID_RUN_TESTS, hInst, NULL);
+            x, by, 160, 36, hwnd, (HMENU)ID_RUN_TESTS, hInst, NULL);
         SendMessage(hrun, WM_SETFONT, (WPARAM)g_font_bold, TRUE);
 
         HWND hclr = CreateWindowA("BUTTON", "X  CLEAR LOG",
             WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
-            x+190, by, 140, 36, hwnd, (HMENU)ID_CLEAR_LOG, hInst, NULL);
+            x+170, by, 130, 36, hwnd, (HMENU)ID_CLEAR_LOG, hInst, NULL);
         SendMessage(hclr, WM_SETFONT, (WPARAM)g_font_bold, TRUE);
+
+        HWND hexp = CreateWindowA("BUTTON", "EXPORT REPORT",
+            WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
+            x+310, by, 150, 36, hwnd, (HMENU)ID_EXPORT, hInst, NULL);
+        SendMessage(hexp, WM_SETFONT, (WPARAM)g_font_bold, TRUE);
 
         g_hstatus = CreateWindowA(STATUSCLASSNAME, NULL,
             WS_CHILD|WS_VISIBLE|SBARS_SIZEGRIP,
@@ -222,6 +247,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             for (int i = 0; i < NUM_BUTTONS; i++) {
                 BtnEvent ev = btn_update(&g_fsm[i], now);
                 if (ev == EVENT_LONG_PRESS) {
+                    g_stats[i].long_presses++;
                     char buf[LOG_LINE_MAX];
                     _snprintf(buf, sizeof(buf),
                         "[EVENT]  btn=%d  action=long_press  held_ms=%lu  state=HELD",
@@ -232,7 +258,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                     UpdateStateLabel(i);
                 }
                 if (ev == EVENT_SHORT_CLICK) {
-                    /* pending single click resolved after DOUBLE_CLICK_MS timeout */
+                    g_stats[i].clicks++;
                     char buf[LOG_LINE_MAX];
                     _snprintf(buf, sizeof(buf),
                         "[EVENT]  btn=%d  action=short_click  state=IDLE", i+1);
@@ -319,7 +345,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_COMMAND:
         switch (LOWORD(wp)) {
-        case ID_RUN_TESTS:  RunAllTests(); break;
+        case ID_RUN_TESTS:  RunAllTests();  break;
+        case ID_EXPORT:     ExportReport(); break;
         case ID_CLEAR_LOG:
             g_log_buf[0] = 0;
             SetWindowTextA(g_hlog, "");
@@ -329,7 +356,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         break;
 
     case WM_KEYDOWN:
-        if (lp & (1<<30)) break;   /* ignore key repeat */
+        if (lp & (1<<30)) break;
         if (wp == '1') OnBtnPress(0);
         if (wp == '2') OnBtnPress(1);
         if (wp == '3') OnBtnPress(2);
@@ -388,7 +415,7 @@ static void OnBtnPress(int idx)
 {
     DWORD now = GetTickCount();
     BtnEvent ev = btn_press(&g_fsm[idx], now);
-    if (ev == EVENT_NONE) return;   /* already pressed */
+    if (ev == EVENT_NONE) return;
 
     char buf[LOG_LINE_MAX];
     _snprintf(buf, sizeof(buf),
@@ -409,19 +436,17 @@ static void OnBtnRelease(int idx)
     DWORD now = GetTickCount();
     BtnEvent ev = btn_release(&g_fsm[idx], now);
     if (ev == EVENT_NONE) {
-        /*
-         * EVENT_NONE on release = first click, FSM went PENDING.
-         * SHORT_CLICK will fire from btn_update() after DOUBLE_CLICK_MS.
-         * Just update visuals here.
-         */
         UpdateStateLabel(idx);
         InvalidateRect(g_hbtn[idx], NULL, TRUE);
-
         char sb[64];
         _snprintf(sb, sizeof(sb), "  BTN%d  pending double-click...", idx+1);
         SendMessage(g_hstatus, SB_SETTEXTA, 0, (LPARAM)sb);
         return;
     }
+
+    /* update statistics */
+    if (ev == EVENT_DOUBLE_CLICK)       g_stats[idx].double_clicks++;
+    if (ev == EVENT_LONG_PRESS_RELEASE) { /* already counted in WM_TIMER */ }
 
     char buf[LOG_LINE_MAX];
     DWORD held = now - g_fsm[idx].press_tick;
@@ -505,7 +530,77 @@ static void AppendLog(const char *line)
     SendMessage(g_hlog, EM_LINESCROLL, 0, lines);
 }
 
-/* ── unit tests (use core/btn_fsm.c directly) ──────────────────────────── */
+/* ── export report ─────────────────────────────────────────────────────── */
+
+static void ExportReport(void)
+{
+    /* путь рядом с .exe */
+    char path[MAX_PATH];
+    GetModuleFileNameA(NULL, path, MAX_PATH);
+    char *slash = strrchr(path, '\\');
+    if (slash) *(slash+1) = 0;
+    strncat(path, "btnsim_report.txt", MAX_PATH - strlen(path) - 1);
+
+    FILE *f = fopen(path, "w");
+    if (!f) {
+        AppendLog("[EXPORT] ERROR: cannot open btnsim_report.txt");
+        SendMessage(g_hstatus, SB_SETTEXTA, 0, (LPARAM)"  EXPORT FAILED");
+        return;
+    }
+
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+
+    fprintf(f, "===================================================\n");
+    fprintf(f, "  BTNSIM SESSION REPORT\n");
+    fprintf(f, "===================================================\n");
+    fprintf(f, "  Generated: %04d-%02d-%02d  %02d:%02d:%02d\n",
+        st.wYear, st.wMonth, st.wDay,
+        st.wHour, st.wMinute, st.wSecond);
+    fprintf(f, "===================================================\n\n");
+
+    fprintf(f, "--- STATISTICS ---------------------------------\n");
+    for (int i = 0; i < NUM_BUTTONS; i++) {
+        fprintf(f, "  BTN %d:  clicks=%-4d  double=%-4d  long=%-4d\n",
+            i+1,
+            g_stats[i].clicks,
+            g_stats[i].double_clicks,
+            g_stats[i].long_presses);
+    }
+    fprintf(f, "\n");
+
+    fprintf(f, "--- TEST RESULTS -------------------------------\n");
+    if (g_test_ran) {
+        fprintf(f, "  %d passed  /  %d failed  /  %d total\n",
+            g_test_passed, g_test_failed,
+            g_test_passed + g_test_failed);
+    } else {
+        fprintf(f, "  (tests not run yet)\n");
+    }
+    fprintf(f, "\n");
+
+    fprintf(f, "--- FULL LOG -----------------------------------\n");
+    /* конвертируем \r\n → \n для читаемости */
+    const char *p = g_log_buf;
+    while (*p) {
+        if (*p == '\r') { p++; continue; }
+        fputc(*p, f);
+        p++;
+    }
+    fprintf(f, "\n===================================================\n");
+
+    fclose(f);
+
+    char msg[LOG_LINE_MAX];
+    _snprintf(msg, sizeof(msg), "[EXPORT] report saved → %s", path);
+    AppendLog(msg);
+
+    char sb[MAX_PATH];
+    _snprintf(sb, sizeof(sb), "  Exported → btnsim_report.txt");
+    SendMessage(g_hstatus, SB_SETTEXTA, 0, (LPARAM)sb);
+}
+
+/* ── unit tests ─────────────────────────────────────────────────────────── */
 
 typedef struct { const char *name; int passed; char msg[256]; } TR;
 
@@ -515,21 +610,16 @@ typedef struct { const char *name; int passed; char msg[256]; } TR;
             "want %d got %d -- %s", (int)(b), (int)(a), (m)); \
         r->passed = 0; return; \
     }
-
 #define CHK_EV(ev, expected, m) CHK_INT((int)(ev), (int)(expected), m)
 
-/* short click: press, release, wait > DOUBLE_CLICK_MS → SHORT_CLICK */
 static void test_short_click(TR *r) {
     r->passed = 1; strcpy(r->msg, "OK");
     BtnFSM b; btn_init(&b);
-    btn_press(&b, 1000);
-    btn_release(&b, 1100);                  /* → PENDING */
-    BtnEvent ev = btn_update(&b, 1550);     /* 450ms timeout */
+    btn_press(&b, 1000); btn_release(&b, 1100);
+    BtnEvent ev = btn_update(&b, 1550);
     CHK_EV(ev, EVENT_SHORT_CLICK, "SHORT_CLICK after timeout");
     CHK_INT(b.state, BTN_IDLE, "IDLE");
 }
-
-/* long press: hold 900ms → LONG_PRESS, release → LONG_PRESS_RELEASE */
 static void test_long_press(TR *r) {
     r->passed = 1; strcpy(r->msg, "OK");
     BtnFSM b; btn_init(&b);
@@ -541,19 +631,15 @@ static void test_long_press(TR *r) {
     CHK_EV(ev, EVENT_LONG_PRESS_RELEASE, "LONG_PRESS_RELEASE");
     CHK_INT(b.state, BTN_IDLE, "IDLE after release");
 }
-
-/* double click: two clicks within DOUBLE_CLICK_MS */
 static void test_double_click(TR *r) {
     r->passed = 1; strcpy(r->msg, "OK");
     BtnFSM b; btn_init(&b);
-    btn_press(&b, 3000); btn_release(&b, 3050);   /* first → PENDING */
+    btn_press(&b, 3000); btn_release(&b, 3050);
     btn_press(&b, 3150);
-    BtnEvent ev = btn_release(&b, 3200);           /* second within 400ms */
+    BtnEvent ev = btn_release(&b, 3200);
     CHK_EV(ev, EVENT_DOUBLE_CLICK, "DOUBLE_CLICK");
     CHK_INT(b.state, BTN_IDLE, "IDLE");
 }
-
-/* press without release: should stay PRESSED, no long yet */
 static void test_press_no_release(TR *r) {
     r->passed = 1; strcpy(r->msg, "OK");
     BtnFSM b; btn_init(&b);
@@ -562,8 +648,6 @@ static void test_press_no_release(TR *r) {
     CHK_EV(ev, EVENT_NONE, "no event yet");
     CHK_INT(b.state, BTN_PRESSED, "still PRESSED");
 }
-
-/* two buttons independent */
 static void test_multi_btn(TR *r) {
     r->passed = 1; strcpy(r->msg, "OK");
     BtnFSM b1, b2; btn_init(&b1); btn_init(&b2);
@@ -574,8 +658,6 @@ static void test_multi_btn(TR *r) {
     CHK_EV(e1, EVENT_SHORT_CLICK, "btn1 SHORT_CLICK");
     CHK_EV(e2, EVENT_SHORT_CLICK, "btn2 SHORT_CLICK");
 }
-
-/* boundary: 799ms = no long, 800ms = long */
 static void test_boundary(TR *r) {
     r->passed = 1; strcpy(r->msg, "OK");
     BtnFSM b; btn_init(&b);
@@ -586,8 +668,6 @@ static void test_boundary(TR *r) {
     ev = btn_update(&b, 7800);
     CHK_EV(ev, EVENT_LONG_PRESS, "LONG_PRESS at 800ms");
 }
-
-/* initial state */
 static void test_idle_init(TR *r) {
     r->passed = 1; strcpy(r->msg, "OK");
     BtnFSM b; btn_init(&b);
@@ -636,6 +716,11 @@ static void RunAllTests(void)
         "[TEST]  %d passed  /  %d failed  /  %d total", passed, failed, n);
     AppendLog(sum);
     AppendLog("[TEST]  ==========================================");
+
+    /* сохраняем для экспорта */
+    g_test_passed = passed;
+    g_test_failed = failed;
+    g_test_ran    = 1;
 
     char sb[64];
     _snprintf(sb, sizeof(sb), "  Tests: %d passed, %d failed", passed, failed);
